@@ -1,77 +1,214 @@
-import { motion } from 'framer-motion';
-import { useState } from 'react';
-import { MapPin, Navigation, Clock, Shield, Route } from 'lucide-react';
+// React and hooks for state
+import React, { useState } from "react";
+
+// Animation library you use for beautiful effects
+import { motion } from "framer-motion";
+
+// Icons for UI
+import { MapPin, Navigation, Clock, Shield, Route } from "lucide-react";
+
+// Map libraries for displaying/mapping routes
+import { MapContainer, TileLayer, Polyline } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+
+// axios for making API requests
+import axios from "axios";
+
+// Safety Score Circle Component
+const SafetyScore = ({ score }) => {
+  const circumference = 2 * Math.PI * 45;
+  const strokeDasharray = `${(score / 100) * circumference} ${circumference}`;
+
+  return (
+    <div className="relative w-24 h-24">
+      <svg className="w-24 h-24 transform -rotate-90" viewBox="0 0 100 100">
+        <circle
+          cx="50"
+          cy="50"
+          r="45"
+          stroke="hsl(220 20% 20%)"
+          strokeWidth="8"
+          fill="transparent"
+        />
+        <motion.circle
+          cx="50"
+          cy="50"
+          r="45"
+          stroke="hsl(120 100% 50%)"
+          strokeWidth="8"
+          fill="transparent"
+          strokeDasharray={strokeDasharray}
+          strokeLinecap="round"
+          initial={{ strokeDasharray: `0 ${circumference}` }}
+          animate={{ strokeDasharray }}
+          transition={{ duration: 1.5, ease: "easeOut" }}
+          className="drop-shadow-lg"
+          style={{ filter: 'drop-shadow(0 0 8px hsl(120 100% 50% / 0.3))' }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex items-center justify-center">
+        <span className="text-2xl font-bold text-foreground">{score}</span>
+      </div>
+    </div>
+  );
+};
+
+const GEOAPIFY_API_KEY = "18a53cc064074dd3b34c0f14ec3ee10c"; // <-- REPLACE THIS
 
 const Routes = () => {
   const [startLocation, setStartLocation] = useState('');
   const [destination, setDestination] = useState('');
-  const [routes, setRoutes] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [routes, setRoutes] = useState(null);
+  const [error, setError] = useState("");
 
+  // Geocode address to coordinates
+  async function geocode(address) {
+    const response = await axios.get(
+      `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(address)}&apiKey=${GEOAPIFY_API_KEY}`
+    );
+    if (response.data.features.length > 0) {
+      return response.data.features[0].geometry.coordinates; // [lon, lat]
+    }
+    throw new Error(`Location "${address}" not found`);
+  }
+
+  // Get alternative routes
+  async function fetchRoutes(
+    originCoords,
+    destCoords
+  ) {
+    const response = await axios.get(
+      "https://api.geoapify.com/v1/routing",
+      {
+        params: {
+          waypoints: `${originCoords[1]},${originCoords[0]}|${destCoords[1]},${destCoords[0]}`,
+          mode: "drive", // change to "foot" or "bike" as needed
+          apiKey: GEOAPIFY_API_KEY,
+          alternatives: 5
+        }
+      }
+    );
+    return response.data.features;
+  }
+
+  // Simulate safety score: you can use a real safety API if available!
+  async function fetchSafetyScore(route) {
+    // Replace this with real API for India safety/crime data if you find one
+    return Math.max(30, 100 - (route.properties.distance / 1000) * Math.random() * 5);
+  }
+
+  // ==== THE MAIN ROUTE HANDLER ====
   const handleFindRoutes = async (e) => {
     e.preventDefault();
-    if (!startLocation || !destination) return;
-
     setIsLoading(true);
-    
-    // Simulate API call
-    setTimeout(() => {
+    setError("");
+    setRoutes(null);
+    try {
+      const originCoords = await geocode(startLocation);
+      const destCoords = await geocode(destination);
+      const alternatives = await fetchRoutes(originCoords, destCoords);
+
+      // Compute fake safety scores
+      const scoredRoutes = await Promise.all(
+        alternatives.map(async route => ({
+          route,
+          distance: route.properties.distance,
+          duration: route.properties.time,
+          safetyScore: await fetchSafetyScore(route)
+        }))
+      );
+      // Fastest: shortest duration
+      const fastest = scoredRoutes.reduce((min, curr) =>
+        curr.duration < min.duration ? curr : min, scoredRoutes[0]);
+      // Safest of the "not-too-long" routes
+      const candidateSafest = scoredRoutes
+        .filter(r => r.distance <= 1.2 * fastest.distance)
+        .reduce((min, curr) => curr.safetyScore > min.safetyScore ? curr : min, scoredRoutes[0]);
+      if (!candidateSafest) throw new Error("No safe route within 20% length margin.");
+
+      // Format for UI
       setRoutes({
         fastest: {
-          duration: '4h 32m',
-          distance: '287 km',
-          traffic: 'Moderate',
-          route: 'NH44 → State Highway 15 → City Ring Road'
+          duration: (fastest.duration / 60).toFixed(1) + " min",
+          distance: (fastest.distance / 1000).toFixed(2) + " km",
+          route: decodeRouteForPreview(fastest.route.properties.legs),
+          geometry: fastest.route.geometry,
         },
         safest: {
-          duration: '5h 15m',
-          distance: '312 km',
-          safety_score: 92,
-          route: 'Express Highway → Bypass Route → Local Roads',
-          features: ['Well-lit roads', 'Police checkpoints', 'Rest stops']
+          duration: (candidateSafest.duration / 60).toFixed(1) + " min",
+          distance: (candidateSafest.distance / 1000).toFixed(2) + " km",
+          safety_score: Math.round(candidateSafest.safetyScore),
+          features: ["Well-lit", "AI evaluated", "Typical police patrolling"], // You can enhance these if you use a real safety API
+          route: decodeRouteForPreview(candidateSafest.route.properties.legs),
+          geometry: candidateSafest.route.geometry,
         }
       });
+    } catch (err) {
+      setError(err.message || "Failed to find routes");
+    } finally {
       setIsLoading(false);
-    }, 2000);
+    }
   };
 
-  const SafetyScore = ({ score }) => {
-    const circumference = 2 * Math.PI * 45;
-    const strokeDasharray = `${(score / 100) * circumference} ${circumference}`;
+  // For now, preview the major steps as a string
+  function decodeRouteForPreview(legs) {
+    if (!legs) return "No preview";
+    return legs.map(
+      (leg) =>
+        leg.steps
+          .map((s) => s.instruction.text)
+          .slice(0, 2)
+          .join(", ")
+    ).join(" → ");
+  }
 
-    return (
-      <div className="relative w-24 h-24">
-        <svg className="w-24 h-24 transform -rotate-90" viewBox="0 0 100 100">
-          <circle
-            cx="50"
-            cy="50"
-            r="45"
-            stroke="hsl(220 20% 20%)"
-            strokeWidth="8"
-            fill="transparent"
-          />
-          <motion.circle
-            cx="50"
-            cy="50"
-            r="45"
-            stroke="hsl(120 100% 50%)"
-            strokeWidth="8"
-            fill="transparent"
-            strokeDasharray={strokeDasharray}
-            strokeLinecap="round"
-            initial={{ strokeDasharray: `0 ${circumference}` }}
-            animate={{ strokeDasharray }}
-            transition={{ duration: 1.5, ease: "easeOut" }}
-            className="drop-shadow-lg"
-            style={{ filter: 'drop-shadow(0 0 8px hsl(120 100% 50% / 0.3))' }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-2xl font-bold text-foreground">{score}</span>
-        </div>
-      </div>
-    );
-  };
+  // --- MAP RENDERING (using react-leaflet) ---
+function RoutesMap() {
+  if (
+    !routes ||
+    !routes.fastest ||
+    !routes.safest ||
+    !routes.fastest.geometry ||
+    !routes.safest.geometry ||
+    !Array.isArray(routes.fastest.geometry.coordinates) ||
+    !routes.fastest.geometry.coordinates.length // no points
+  ) {
+    return <div className="text-red-500">Map data not available.</div>;
+  }
+
+  // convert [lon, lat] to [lat, lon]
+  const fastestCoords = routes.fastest.geometry.coordinates.map(
+    (coords) => Array.isArray(coords) && coords.length === 2 ? [coords[1], coords[0]] : null
+  ).filter(Boolean);
+
+  const safestCoords = routes.safest.geometry.coordinates.map(
+    (coords) => Array.isArray(coords) && coords.length === 2 ? [coords[1], coords[0]] : null
+  ).filter(Boolean);
+
+  // fallback center if coords are missing/invalid
+  const center =
+    (fastestCoords[0] &&
+      typeof fastestCoords[0][0] === "number" &&
+      typeof fastestCoords[0][1] === "number")
+      ? fastestCoords[0]
+      : [28.6139, 77.2090]; // Delhi fallback
+
+  if (!center || !Array.isArray(center) || center.length !== 2 || typeof center[0] !== 'number' || typeof center[1] !== 'number') {
+    return <div className="text-red-500">Invalid map center coordinates.</div>;
+  }
+
+  return (
+    <MapContainer center={center} zoom={13} style={{ height: "400px", width: "100%" }} className="mt-8">
+      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+      {fastestCoords.length > 0 &&
+        <Polyline positions={fastestCoords} color="blue" weight={5} />}
+      {safestCoords.length > 0 &&
+        <Polyline positions={safestCoords} color="green" weight={5} />}
+    </MapContainer>
+  );
+}
+
 
   return (
     <div className="min-h-screen pt-20 px-4">
@@ -107,9 +244,9 @@ const Routes = () => {
                 value={startLocation}
                 onChange={(e) => setStartLocation(e.target.value)}
                 className="w-full pl-12 pr-4 py-4 bg-input border border-border rounded-xl text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
+                required
               />
             </div>
-            
             <div className="relative">
               <Navigation className="absolute left-3 top-1/2 transform -translate-y-1/2 text-secondary w-5 h-5" />
               <input
@@ -118,10 +255,10 @@ const Routes = () => {
                 value={destination}
                 onChange={(e) => setDestination(e.target.value)}
                 className="w-full pl-12 pr-4 py-4 bg-input border border-border rounded-xl text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
+                required
               />
             </div>
           </div>
-
           <motion.button
             type="submit"
             whileHover={{ scale: 1.02 }}
@@ -149,6 +286,11 @@ const Routes = () => {
           </motion.button>
         </motion.form>
 
+        {/* Error notice */}
+        {error && (
+          <div className="text-red-500 text-center font-semibold py-2">{error}</div>
+        )}
+
         {/* Results */}
         {routes && (
           <motion.div
@@ -168,7 +310,6 @@ const Routes = () => {
                   <p className="text-muted-foreground">Quickest way to reach</p>
                 </div>
               </div>
-
               <div className="space-y-4">
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Duration</span>
@@ -177,10 +318,6 @@ const Routes = () => {
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Distance</span>
                   <span className="text-xl font-semibold text-foreground">{routes.fastest.distance}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-muted-foreground">Traffic</span>
-                  <span className="text-secondary font-medium">{routes.fastest.traffic}</span>
                 </div>
                 <div className="pt-4 border-t border-border">
                   <p className="text-sm text-muted-foreground mb-2">Route Preview:</p>
@@ -192,7 +329,6 @@ const Routes = () => {
             {/* Safest Route */}
             <div className="glass glass-hover p-6 rounded-2xl relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-green-500/20 to-transparent rounded-full blur-2xl" />
-              
               <div className="flex items-center space-x-3 mb-6 relative z-10">
                 <div className="p-3 bg-gradient-to-r from-green-500 to-emerald-500 rounded-xl glow-secondary">
                   <Shield className="w-6 h-6 text-white" />
@@ -202,7 +338,6 @@ const Routes = () => {
                   <p className="text-muted-foreground">AI Recommended</p>
                 </div>
               </div>
-
               <div className="space-y-4 relative z-10">
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Duration</span>
@@ -212,12 +347,10 @@ const Routes = () => {
                   <span className="text-muted-foreground">Distance</span>
                   <span className="text-xl font-semibold text-foreground">{routes.safest.distance}</span>
                 </div>
-                
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Safety Score</span>
                   <SafetyScore score={routes.safest.safety_score} />
                 </div>
-
                 <div className="pt-4 border-t border-border">
                   <p className="text-sm text-muted-foreground mb-2">Safety Features:</p>
                   <div className="flex flex-wrap gap-2">
@@ -236,23 +369,15 @@ const Routes = () => {
           </motion.div>
         )}
 
-        {/* Map Placeholder */}
-        {routes && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
-            className="glass glass-hover p-8 rounded-2xl text-center"
-          >
-            <div className="bg-gradient-to-br from-primary/10 to-secondary/10 rounded-xl h-64 flex items-center justify-center border border-border">
-              <div className="text-center">
-                <MapPin className="w-12 h-12 text-primary mx-auto mb-4" />
-                <h3 className="text-xl font-semibold text-foreground mb-2">Interactive Map</h3>
-                <p className="text-muted-foreground">Google Maps integration coming soon</p>
-              </div>
-            </div>
-          </motion.div>
-        )}
+        {/* Real Map Below */}
+       {routes &&
+  routes.fastest &&
+  routes.fastest.geometry &&
+  Array.isArray(routes.fastest.geometry.coordinates) &&
+  routes.fastest.geometry.coordinates.length > 0 &&
+  <RoutesMap />
+}
+
       </div>
     </div>
   );
